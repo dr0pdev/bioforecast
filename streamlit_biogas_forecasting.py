@@ -393,6 +393,77 @@ class BiogasForecastingSystem:
         
         return updated_data
     
+    def apply_noise_to_features(self, features, temp_noise=0.5, ph_noise=0.1, enable_noise=True):
+        """Apply random noise to pH and temperature features for realistic forecasting"""
+        if not enable_noise:
+            return features
+        
+        # Create a copy to avoid modifying original features
+        noisy_features = features.copy()
+        
+        # Add noise to temperature (with bounds checking)
+        if temp_noise > 0:
+            temp_variation = np.random.normal(0, temp_noise)
+            new_temp = features['temperature_celsius'] + temp_variation
+            # Clamp to realistic bounds
+            noisy_features['temperature_celsius'] = np.clip(new_temp, 25.0, 50.0)
+        
+        # Add noise to pH (with bounds checking)
+        if ph_noise > 0:
+            ph_variation = np.random.normal(0, ph_noise)
+            new_ph = features['ph'] + ph_variation
+            # Clamp to realistic bounds
+            noisy_features['ph'] = np.clip(new_ph, 5.0, 9.0)
+        
+        return noisy_features
+    
+    def forecast_24_hours_with_noise(self, current_features, model_choice='XGBoost', 
+                                   temp_noise=0.5, ph_noise=0.1, enable_noise=True):
+        """Generate 24-hour forecast with realistic parameter variations"""
+        if model_choice == 'Gradient Boosting':
+            model = self.gb_model
+        elif model_choice == 'XGBoost':
+            model = self.xgb_model
+        else:
+            model = self.lgb_model
+        
+        if model is None or self.scaler is None:
+            st.error("Models not trained yet!")
+            return None, None
+        
+        predictions = []
+        timestamps = []
+        current_time = datetime.now()
+        
+        # Generate 24-hour forecast (480 predictions for 3-minute intervals)
+        n_predictions = 480  # 24 hours * 20 (3-minute intervals per hour)
+        
+        for step in range(n_predictions):
+            # Apply noise to features for this prediction step
+            if enable_noise:
+                noisy_features = self.apply_noise_to_features(
+                    current_features, temp_noise, ph_noise, enable_noise
+                )
+            else:
+                noisy_features = current_features
+            
+            # Convert to model input format
+            current_data = self.prepare_current_features(noisy_features)
+            
+            # Predict next value
+            current_scaled = self.scaler.transform(current_data.reshape(1, -1))
+            pred = model.predict(current_scaled)[0]
+            predictions.append(pred)
+            
+            # Update timestamp
+            next_time = current_time + timedelta(minutes=3 * (step + 1))
+            timestamps.append(next_time)
+            
+            # Update lag features for next prediction
+            current_data = self.update_lag_features(current_data, pred, step)
+        
+        return timestamps, predictions
+    
     def validate_with_pinn(self, features):
         """Validate features using PINN physics"""
         if self.pinn_updater is None:
@@ -747,51 +818,73 @@ def show_forecasting_page(forecasting_system):
         
         # Physical parameters
         st.write("**	 Feed Characteristics**")
-        features['feed_volume_m3_day'] = st.number_input(
+        features['feed_volume_m3_day'] = st.slider(
             "Feed Volume (m³/day)", 
             min_value=10.0, max_value=100.0, value=50.0, step=1.0
         )
-        features['total_solids_percent'] = st.number_input(
+        features['total_solids_percent'] = st.slider(
             "Total Solids (%)", 
             min_value=1.0, max_value=20.0, value=10.0, step=0.1
         )
-        features['volatile_solids_percent'] = st.number_input(
+        features['volatile_solids_percent'] = st.slider(
             "Volatile Solids (%)", 
             min_value=1.0, max_value=15.0, value=8.0, step=0.1
         )
-        features['cod_mg_l'] = st.number_input(
+        features['cod_mg_l'] = st.slider(
             "COD (mg/L)", 
             min_value=5000, max_value=45000, value=25000, step=1000
         )
         
         st.write("**🌡	 Environmental Parameters**")
-        features['temperature_celsius'] = st.number_input(
+        features['temperature_celsius'] = st.slider(
             "Temperature (°C)", 
             min_value=25.0, max_value=50.0, value=37.0, step=0.1
         )
-        features['ph'] = st.number_input(
+        features['ph'] = st.slider(
             "pH", 
             min_value=5.0, max_value=9.0, value=7.0, step=0.1
         )
-        features['alkalinity_mg_l'] = st.number_input(
+        features['alkalinity_mg_l'] = st.slider(
             "Alkalinity (mg/L)", 
             min_value=1000, max_value=6000, value=3000, step=100
         )
         
         st.write("**⚙	 Operational Parameters**")
-        features['retention_time_days'] = st.number_input(
+        features['retention_time_days'] = st.slider(
             "Retention Time (days)", 
-            min_value=5.0, max_value=40.0, value=20.0, step=1.0
+            min_value=5.0, max_value=40.0, value=20.0, step=0.5
         )
-        features['mixing_intensity_rpm'] = st.number_input(
+        features['mixing_intensity_rpm'] = st.slider(
             "Mixing Intensity (RPM)", 
-            min_value=5.0, max_value=35.0, value=15.0, step=1.0
+            min_value=5.0, max_value=35.0, value=15.0, step=0.5
         )
         
         # Model selection
         model_choice = st.selectbox(
             "	 Select Forecasting Model",
             ["XGBoost", "Gradient Boosting", "LightGBM"]
+        )
+        
+        # Noise variation controls
+        st.write("**🎛️ Forecasting Variations**")
+        st.markdown("*Add realistic noise to simulate natural parameter fluctuations*")
+        
+        temp_noise = st.slider(
+            "Temperature Variation (±°C)", 
+            min_value=0.0, max_value=3.0, value=0.5, step=0.1,
+            help="Random temperature fluctuations during forecasting (±°C)"
+        )
+        
+        ph_noise = st.slider(
+            "pH Variation (±units)", 
+            min_value=0.0, max_value=0.5, value=0.1, step=0.01,
+            help="Random pH fluctuations during forecasting (±pH units)"
+        )
+        
+        enable_noise = st.checkbox(
+            "Enable Parameter Variations", 
+            value=True,
+            help="Apply random noise to pH and temperature during forecasting"
         )
         
         # Generate forecast button
@@ -808,8 +901,10 @@ def show_forecasting_page(forecasting_system):
                         for warning in validation_result["warnings"].values():
                             st.write(f"• {warning}")
                 
-                # Generate forecast
-                timestamps, predictions = forecasting_system.forecast_24_hours(features, model_choice)
+                # Generate forecast with noise variations
+                timestamps, predictions = forecasting_system.forecast_24_hours_with_noise(
+                    features, model_choice, temp_noise, ph_noise, enable_noise
+                )
                 
                 if timestamps and predictions:
                     # Store in session state for visualization
@@ -920,15 +1015,15 @@ def show_pinn_validation(forecasting_system):
         
         # Input parameters
         features = {}
-        features['feed_volume_m3_day'] = st.number_input("Feed Volume (m³/day)", value=50.0)
-        features['total_solids_percent'] = st.number_input("Total Solids (%)", value=10.0)
-        features['volatile_solids_percent'] = st.number_input("Volatile Solids (%)", value=8.0)
-        features['cod_mg_l'] = st.number_input("COD (mg/L)", value=25000)
-        features['temperature_celsius'] = st.number_input("Temperature (°C)", value=37.0)
-        features['ph'] = st.number_input("pH", value=7.0)
-        features['alkalinity_mg_l'] = st.number_input("Alkalinity (mg/L)", value=3000)
-        features['retention_time_days'] = st.number_input("Retention Time (days)", value=20.0)
-        features['mixing_intensity_rpm'] = st.number_input("Mixing Intensity (RPM)", value=15.0)
+        features['feed_volume_m3_day'] = st.slider("Feed Volume (m³/day)", min_value=10.0, max_value=100.0, value=50.0, step=1.0)
+        features['total_solids_percent'] = st.slider("Total Solids (%)", min_value=1.0, max_value=20.0, value=10.0, step=0.1)
+        features['volatile_solids_percent'] = st.slider("Volatile Solids (%)", min_value=1.0, max_value=15.0, value=8.0, step=0.1)
+        features['cod_mg_l'] = st.slider("COD (mg/L)", min_value=5000, max_value=45000, value=25000, step=1000)
+        features['temperature_celsius'] = st.slider("Temperature (°C)", min_value=25.0, max_value=50.0, value=37.0, step=0.1)
+        features['ph'] = st.slider("pH", min_value=5.0, max_value=9.0, value=7.0, step=0.1)
+        features['alkalinity_mg_l'] = st.slider("Alkalinity (mg/L)", min_value=1000, max_value=6000, value=3000, step=100)
+        features['retention_time_days'] = st.slider("Retention Time (days)", min_value=5.0, max_value=40.0, value=20.0, step=0.5)
+        features['mixing_intensity_rpm'] = st.slider("Mixing Intensity (RPM)", min_value=5.0, max_value=35.0, value=15.0, step=0.5)
         
         if st.button("	 Validate with PINN", type="primary"):
             validation_result, optimal_features = forecasting_system.validate_with_pinn(features)
